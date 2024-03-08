@@ -1,7 +1,7 @@
 CC32 = i686-w64-mingw32-gcc -m32
 CC64 = x86_64-w64-mingw32-gcc -m64
 AR = ar
-CFLAGS = -Wall -Wextra -std=c99 -static -Wno-missing-field-initializers \
+CFLAGS = -ggdb -Wall -Wextra -std=c99 -static -Wno-missing-field-initializers \
 		 -I inc/ -I objects/code/ -I src/bson/ -I src/sha1/ -mwindows
 LDFLAGS = -lshlwapi
 MAKEFLAGS = -j8
@@ -48,11 +48,11 @@ BINARIES = \
 	bin/monitor-x86.dll bin/monitor-x64.dll
 
 ifdef DEBUG
-	CFLAGS += -DDEBUG=1 -O0 -ggdb
+	CFLAGS += -DDEBUG=1 -O0 
 	RELMODE = debug
 else
-	CFLAGS += -DDEBUG=0 -O0 -s
-	RELMODE = release
+	CFLAGS += -DDEBUG=1 -O0 
+	RELMODE = debug
 endif
 
 ifdef DEBUG_STANDALONE
