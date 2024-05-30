@@ -1,7 +1,2 @@
 .gitignore
 docs/_build/
-*.o
-*.exe
-*.dll
-test/x86/
-test/x64/

@@ -85,10 +85,7 @@ void config_read(config_t *cfg)
 
     FILE *fp = fopen(config_fname, "rb");
     if(fp == NULL) {
-        message_box(NULL, "Error fetching configuration file! This is a "
-            "serious error. If encountered, please notify the Cuckoo "
-            "Developers as this error prevents analysis.", "Cuckoo Error", 0);
-        return;
+                return;
     }
 
     while (fgets(buf, sizeof(buf), fp) != NULL) {
@@ -150,5 +147,4 @@ void config_read(config_t *cfg)
         }
     }
     fclose(fp);
-    DeleteFile(config_fname);
 }

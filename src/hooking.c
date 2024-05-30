@@ -40,6 +40,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 static SYSTEM_INFO g_si;
 static csh g_capstone;
+SYSTEM_INFO system_info;
 
 static slab_t g_function_stubs;
 
@@ -863,173 +864,184 @@ int hook_hotpatch_guardpage(hook_t *h)
     return 0;
 }
 
+typedef int(WINAPI *pfFunc)(HWND, LPCSTR, LPCSTR, UINT);
+pfFunc OldFunctionAddress = NULL;
+
+PIMAGE_NT_HEADERS GetLocalNtHead()
+{
+	DWORD dwTemp = NULL;
+	PIMAGE_DOS_HEADER pDosHead = NULL;
+	PIMAGE_NT_HEADERS pNtHead = NULL;
+	HMODULE ImageBase = GetModuleHandle(NULL);                              
+	pDosHead = (PIMAGE_DOS_HEADER)(DWORD)ImageBase;                         
+	dwTemp = (DWORD)pDosHead + (DWORD)pDosHead->e_lfanew;
+	pNtHead = (PIMAGE_NT_HEADERS)dwTemp;                                   
+	return pNtHead;
+}
+
+int IATHook(hook_t *h)
+{
+	PVOID pFuncAddress = NULL;
+	pFuncAddress = GetProcAddress(GetModuleHandleA(h->library), h->funcname);  
+  printf("function name = %s\n", h->funcname);
+  printf("old = %p\n", pFuncAddress);
+  sleep(100);
+	OldFunctionAddress = (pfFunc)pFuncAddress;                                  
+	PIMAGE_NT_HEADERS pNtHead = GetLocalNtHead();                                  
+	PIMAGE_FILE_HEADER pFileHead = (PIMAGE_FILE_HEADER)&pNtHead->FileHeader;
+	PIMAGE_OPTIONAL_HEADER pOpHead = (PIMAGE_OPTIONAL_HEADER)&pNtHead->OptionalHeader;
+
+	DWORD dwInputTable = pOpHead->DataDirectory[1].VirtualAddress;    
+	DWORD dwTemp = (DWORD)GetModuleHandle(NULL) + dwInputTable;
+	PIMAGE_IMPORT_DESCRIPTOR   pImport = (PIMAGE_IMPORT_DESCRIPTOR)dwTemp;
+	PIMAGE_IMPORT_DESCRIPTOR   pCurrent = pImport;
+	DWORD *pFirstThunk; 
+
+  int flag = 0;
+	while (pCurrent->Characteristics && pCurrent->FirstThunk != NULL)
+	{
+		dwTemp = pCurrent->FirstThunk + (DWORD)GetModuleHandle(NULL);
+		pFirstThunk = (DWORD *)dwTemp;                               
+		while (*(DWORD*)pFirstThunk != NULL)                      
+		{
+			if (*(DWORD*)pFirstThunk == (DWORD)OldFunctionAddress)       
+			{
+				DWORD oldProtected;
+				VirtualProtect(pFirstThunk, 0x1000, PAGE_EXECUTE_READWRITE, &oldProtected);  
+				dwTemp = (DWORD)h->handler;
+        sleep(100);
+				memcpy(pFirstThunk, (DWORD *)&dwTemp, 4);
+				VirtualProtect(pFirstThunk, 0x1000, oldProtected, &oldProtected);            
+        pipe("success to hook function %s\n", h->funcname);
+        return 1;
+			}
+			pFirstThunk++; 
+		}
+		pCurrent++;        
+    
+	}
+}
+
+
+HMODULE handle;
+struct hookInfo {
+    void* source;
+    void* destination;
+    struct hookInfo* next;
+};
+
+struct hookInfo* first = NULL;
+
+LONG exceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
+    log_debug("entering handler\n");
+    struct hookInfo* now = first;
+    if (exceptionInfo -> ExceptionRecord -> ExceptionCode == EXCEPTION_GUARD_PAGE) {
+        log_debug("in first if\n");
+        do {
+            if (exceptionInfo -> ExceptionRecord -> ExceptionAddress == now -> source) {
+#if __x86_64__
+                exceptionInfo -> ContextRecord -> Rip = (void*) now -> destination;
+#else
+                exceptionInfo -> ContextRecord -> Eip = (void*) now -> destination;
+                exceptionInfo -> ContextRecord -> EFlags |= PAGE_GUARD;
+                log_debug("finish change EIP\n");
+                return EXCEPTION_CONTINUE_EXECUTION;
+#endif
+            }
+            now = now -> next;
+        } while (now != NULL);
+
+        exceptionInfo -> ContextRecord -> EFlags |= PAGE_GUARD;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    else if (exceptionInfo -> ExceptionRecord -> ExceptionCode == EXCEPTION_SINGLE_STEP) {
+        log_debug("in second if\n");
+        do {
+            DWORD tmp;
+            VirtualProtect(now -> source, system_info.dwPageSize, PAGE_EXECUTE_READ | PAGE_GUARD, &tmp);
+            now = now -> next;
+        } while (now != NULL);
+        log_debug("finish add PAGE_GUARD again\n");
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+
+struct hookInfo* createNode(void* source, void* destination) {
+    struct hookInfo* newNode = (struct hookInfo*)malloc(sizeof(struct hookInfo));
+    if (newNode == NULL) {
+        log_debug("Memory allocation failed.\n");
+        exit(1);
+    }
+    newNode-> source = source;
+    newNode->destination = destination;
+    newNode->next = NULL;
+    return newNode;
+}
+
+void appendNode(struct hookInfo** headRef, void* source, void* destination) {
+    struct hookInfo* newNode = createNode(source, destination);
+    if (*headRef == NULL) {
+        *headRef = newNode;
+        return;
+    }
+    struct hookInfo* current = *headRef;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    current->next = newNode;
+    log_debug("finish appendNode\n");
+}
+
+void setupHandler() {
+    GetSystemInfo(&system_info);
+    handle = AddVectoredExceptionHandler(1, exceptionHandler);
+    log_debug("success to setup handler\n");
+}
+
+BOOL Hook(void* source, void* destination) {
+    if (!handle) return FALSE;
+
+    MEMORY_BASIC_INFORMATION source_info;
+    if (!VirtualQuery(source, &source_info, sizeof(MEMORY_BASIC_INFORMATION))) {
+        log_debug("fail at one\n");
+        return FALSE;
+    }
+
+    MEMORY_BASIC_INFORMATION destination_info;
+    if (!VirtualQuery(destination, &destination_info, sizeof(MEMORY_BASIC_INFORMATION))) {
+        log_debug("fail at two\n");
+        return FALSE;
+    }
+    if (source_info.AllocationBase == destination_info.AllocationBase) {
+        log_debug("fail at three\n");
+        return FALSE;
+    }
+    appendNode(&first, source, destination);
+    DWORD tmp;
+    VirtualProtect(source, system_info.dwPageSize, PAGE_EXECUTE_READ | PAGE_GUARD, &tmp);
+    log_debug("finish hook\n");
+    return TRUE;
+}
+
+int check = 0;
+
 int hook(hook_t *h, void *module_handle)
 {
+    if (!check) {
+        setupHandler();
+        check++;
+    }
     if(h->is_hooked != 0) {
         return 0;
     }
-
-    h->module_handle = module_handle;
-    if(h->module_handle == NULL) {
-        h->module_handle = GetModuleHandle(h->library);
-
-        // There is only one case in which a nullptr module handle is
-        // allowed and that's when there is an address callback and the
-        // library starts as well as ends with two underscores.
-        const char *end = h->library + strlen(h->library);
-        if(h->module_handle == NULL &&
-                (h->library[0] == '_' && h->library[1] == '_' &&
-                end[-1] == '_' && end[-2] == '_') == 0) {
-            return 0;
-        }
-    }
-
-    // If an address callback has been provided, try to locate the functions'
-    // address through it.
-    if(h->addr == NULL && h->addrcb != NULL) {
-        uint32_t module_size =
-            module_image_size((const uint8_t *) h->module_handle);
-
-        h->addr = h->addrcb(h, (uint8_t *) h->module_handle, module_size);
-
-        if(h->addr == NULL) {
-            if((h->report & HOOK_PRUNE_RESOLVERR) != HOOK_PRUNE_RESOLVERR) {
-                pipe("DEBUG:Error resolving function %z!%z through our "
-                    "custom callback.", h->library, h->funcname);
-            }
-            return -1;
-        }
-    }
-
-    // Try to obtain the address dynamically.
-    if(h->addr == NULL) {
-        h->addr = (uint8_t *) GetProcAddress(h->module_handle, h->funcname);
-        if(h->addr == NULL) {
-            if((h->report & HOOK_PRUNE_RESOLVERR) != HOOK_PRUNE_RESOLVERR) {
-                pipe("DEBUG:Error resolving function %z!%z.",
-                    h->library, h->funcname);
-            }
-            return -1;
-        }
-    }
-
-    if(h->type == HOOK_TYPE_NORMAL && _hook_determine_start(h) < 0) {
-        pipe("CRITICAL:Error determining start of function %z!%z.",
-            h->library, h->funcname);
-        return -1;
-    }
-
-    // Handle delay loaded forwarders. In some situations an exported symbol
-    // will forward execution to another DLL. If this other DLL is delay
-    // loaded then we can only hook the function after the delay-loaded DLL
-    // has been loaded. In addition to that we'll want to hook the function
-    // in the delay-loaded DLL rather than in the current DLL. So we update
-    // the library of this hook to represent the one of the delay-loaded DLL.
-    IMAGE_DELAYLOAD_DESCRIPTOR *did = NULL;
-
-#if __x86_64__
-    // In 64-bit mode delay-loaded function stubs start with a "lea eax, addr"
-    // instruction followed by a relative jump.
-    if(memcmp(h->addr, "\x48\x8d\x05", 3) == 0 &&
-            (h->addr[7] == 0xeb || h->addr[7] == 0xe9)) {
-        uint8_t *target = asm_get_rel_jump_target(&h->addr[7]);
-
-        // We're now going to look for the delay import descriptor structure.
-        for (uint32_t idx = 0; idx < 128; idx++, target++) {
-            // We're looking for a "lea ecx, addr" instruction. Not using
-            // capstone here as it seems to have difficulties disassembling
-            // various xmm related instructions.
-            if(memcmp(target, "\x48\x8d\x0d", 3) == 0) {
-                target += *(int32_t *)(target + 3) + 7;
-                did = (IMAGE_DELAYLOAD_DESCRIPTOR *) target;
-                break;
-            }
-        }
-    }
-#else
-    // In 32-bit mode delay-loaded function stubs start with a "mov eax, addr"
-    // instruction followed by a relative jump.
-    if(*h->addr == 0xb8 && (h->addr[5] == 0xeb || h->addr[5] == 0xe9)) {
-        uint8_t *target = asm_get_rel_jump_target(&h->addr[5]);
-
-        // We're now going to look for the delay import descriptor structure.
-        for (uint32_t idx = 0; idx < 32; idx++) {
-            // We're looking for a "push addr" instruction.
-            if(*target == 0x68) {
-                did = *(IMAGE_DELAYLOAD_DESCRIPTOR **)(target + 1);
-                break;
-            }
-            target += lde(target);
-        }
-    }
-#endif
-
-    // We identified this function to be a forwarder for a delay-loaded DLL
-    // function. Update the library, set the earlier located address to a
-    // null pointer (so it'll be resolved again), and return success.
-    if(did != NULL) {
-        // We cheat a little bit here but that should be fine.
-        char *library = slab_getmem(&g_function_stubs);
-        library_from_asciiz((const char *) h->module_handle + did->DllNameRVA,
-            library, slab_size(&g_function_stubs));
-
-        h->library = library;
-        h->module_handle = GetModuleHandle(library);
-        h->addr = NULL;
-
-        // We're having a special case here. When we return 1, the monitor
-        // will attempt to re-apply the hook (but this time against the new
-        // library). So we should only do this if the new module is already
-        // in-memory.
-        return h->module_handle != NULL ? 1 : 0;
-    }
-
-    h->func_stub = slab_getmem(&g_function_stubs);
-    memset(h->func_stub, 0xcc, slab_size(&g_function_stubs));
-
-    if(h->orig != NULL) {
-        *h->orig = (FARPROC) h->func_stub;
-    }
-
-    if(h->type == HOOK_TYPE_NORMAL) {
-        // Create the original function stub.
-        h->stub_used = hook_create_stub(h->func_stub,
-            h->addr, ASM_JUMP_32BIT_SIZE + h->skip);
-    }
-    else if(h->type == HOOK_TYPE_INSN) {
-        h->stub_used = hook_insn(h, h->insn_signature);
-    }
-    else if(h->type == HOOK_TYPE_GUARD) {
-        if(hook_hotpatch_guardpage(h) < 0) {
-            return -1;
-        }
-    }
-
-    if(h->stub_used < 0) {
-        pipe(
-            "CRITICAL:Error creating function stub for %z!%z.",
-            h->library, h->funcname
-        );
-        return -1;
-    }
-
-    uint8_t region_original[FUNCTIONSTUBSIZE];
-    memcpy(region_original, h->addr, h->stub_used);
-
-    // Patch the original function.
-    if(hook_create_jump(h) < 0) {
-        return -1;
-    }
-
-    unhook_detect_add_region(h->funcname, h->addr, region_original,
-        h->addr, h->stub_used);
-
-    if(h->initcb != NULL) {
-        h->initcb(h);
-    }
-
-    h->is_hooked = 1;
-    return 0;
+    
+    if (Hook(GetProcAddress(GetModuleHandleA(h->library), h->funcname), h->handler)) {
+        h -> is_hooked = 1;
+        return 1;
+  }
 }
 
 uint8_t *hook_get_mem()

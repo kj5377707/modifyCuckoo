@@ -180,7 +180,24 @@ static {{ hook.signature.return_value }} ({{ hook.signature.calling_convention }
     {{ log_api(hook, ret='0') }}
     {% endif %}
 
-    {{ call_old(hook) }}
+    DWORD old_protection;
+    SYSTEM_INFO system_info;
+    GetSystemInfo(&system_info);
+
+    Old_{{ hook.library}}_{{ hook.apiname}} = GetProcAddress(GetModuleHandleA("{{ hook.library }}"), "{{ hook.apiname }}");
+    VirtualProtect(Old_{{ hook.library }}_{{ hook.apiname }}, system_info.dwPageSize, PAGE_EXECUTE_READ, &old_protection);
+    int ret = {{hook.apiname}}(
+     {%- for param in hook.parameters: %}
+        {% if replace_args and param.argname in hook.replace -%}
+            {{ hook.replace[param.argname] }}
+        {%- else -%}
+            {{ param.argname }}
+        {%- endif %}
+        {%- if not loop.last %},{% endif -%}
+    {%- endfor %} 
+    );
+    VirtualProtect(Old_{{ hook.library }}_{{ hook.apiname }}, system_info.dwPageSize, old_protection, &old_protection);
+    
 
     {%- if hook.middle: %}
     {% for line in hook.middle: %}
