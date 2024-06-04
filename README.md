@@ -3,7 +3,8 @@ What is this?
 
 this is the fork of cuckoo monitor.  
 if you want to use new hook only, here is the link : https://github.com/kj5377707/cuckooNewHook  
-if you also want to use the modified server. use this link instead :     
+if you also want to use the modified server. use this link instead : https://github.com/kj5377707/cuckooModifyHost  
+follow the instruction in README
 
 # TODO
 fully test for whole monitor  
